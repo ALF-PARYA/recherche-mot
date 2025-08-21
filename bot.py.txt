@@ -1,0 +1,143 @@
+import requests
+from bs4 import BeautifulSoup
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import statistics
+import schedule
+import time
+import os
+from datetime import datetime
+
+# ==============================
+# CONFIG
+# ==============================
+EMAIL_SENDER = os.getenv("antoine020999@gmail.com")
+EMAIL_PASSWORD = os.getenv("Lafant020900*")
+EMAIL_RECEIVER = os.getenv("antoine020999@gmail.com")
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+
+LEBONCOIN_URL = "https://www.leboncoin.fr/recherche?category=2&text=mt07"
+LACENTRALE_URL = "https://www.lacentrale.fr/listing?makesModelsCommercialNames=YAMAHA%3AMT%2007"
+
+# Mémoire des bonnes affaires trouvées dans la journée
+bonnes_affaires_jour = []
+cote_moyenne_du_jour = []
+
+
+# ==============================
+# SCRAPING
+# ==============================
+def scrape_leboncoin():
+    annonces = []
+    r = requests.get(LEBONCOIN_URL, headers={"User-Agent": "Mozilla/5.0"})
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    for ad in soup.find_all("a", {"data-qa-id": "aditem_container"}):
+        titre = ad.find("p", {"data-qa-id": "aditem_title"}).text.strip()
+        prix_tag = ad.find("span", {"data-qa-id": "aditem_price"})
+        if not prix_tag:
+            continue
+        prix = int(prix_tag.text.replace("€", "").replace(" ", "").strip())
+        lien = "https://www.leboncoin.fr" + ad["href"]
+        annonces.append({"titre": titre, "prix": prix, "lien": lien})
+    return annonces
+
+
+def scrape_lacentrale():
+    annonces = []
+    r = requests.get(LACENTRALE_URL, headers={"User-Agent": "Mozilla/5.0"})
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    for ad in soup.find_all("div", class_="searchCard"):
+        titre = ad.find("h3").text.strip()
+        prix_tag = ad.find("span", class_="searchCardPrice")
+        if not prix_tag:
+            continue
+        prix = int(prix_tag.text.replace("€", "").replace(" ", "").strip())
+        lien = "https://www.lacentrale.fr" + ad.find("a")["href"]
+        annonces.append({"titre": titre, "prix": prix, "lien": lien})
+    return annonces
+
+
+# ==============================
+# ALERTES
+# ==============================
+def send_email(alertes, cote_moyenne):
+    msg = MIMEMultipart()
+    msg["From"] = EMAIL_SENDER
+    msg["To"] = EMAIL_RECEIVER
+    msg["Subject"] = f"🚨 Récap des bonnes affaires MT-07 ({datetime.now().strftime('%d/%m/%Y')})"
+
+    contenu = f"Cote moyenne du marché aujourd'hui : {cote_moyenne:.0f} €\n\n"
+    if alertes:
+        contenu += "Annonces sous-évaluées détectées :\n\n"
+        for a in alertes:
+            contenu += f"- {a['titre']} | {a['prix']} € | {a['lien']}\n"
+    else:
+        contenu += "⚡ Aucune bonne affaire détectée aujourd'hui."
+
+    msg.attach(MIMEText(contenu, "plain"))
+
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        server.starttls()
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.send_message(msg)
+
+
+# ==============================
+# JOB HEURE PAR HEURE
+# ==============================
+def job_check():
+    global bonnes_affaires_jour, cote_moyenne_du_jour
+
+    print("🔎 Vérification des annonces...")
+    annonces = scrape_leboncoin() + scrape_lacentrale()
+    prix_list = [a["prix"] for a in annonces if a["prix"] > 0]
+
+    if prix_list:
+        cote_moyenne = statistics.mean(prix_list)
+        cote_moyenne_du_jour.append(cote_moyenne)
+        seuil = cote_moyenne * 0.85  # -15%
+
+        nouvelles_affaires = [a for a in annonces if a["prix"] < seuil]
+        if nouvelles_affaires:
+            bonnes_affaires_jour.extend(nouvelles_affaires)
+            print(f"✅ {len(nouvelles_affaires)} nouvelles bonnes affaires stockées.")
+        else:
+            print("⚡ Rien de nouveau cette heure.")
+    else:
+        print("❌ Aucune annonce trouvée.")
+
+
+# ==============================
+# JOB DU SOIR
+# ==============================
+def job_envoi():
+    global bonnes_affaires_jour, cote_moyenne_du_jour
+
+    print("📩 Envoi du récapitulatif du jour...")
+    if cote_moyenne_du_jour:
+        moyenne_du_jour = statistics.mean(cote_moyenne_du_jour)
+    else:
+        moyenne_du_jour = 0
+
+    send_email(bonnes_affaires_jour, moyenne_du_jour)
+
+    # Réinitialisation pour le lendemain
+    bonnes_affaires_jour = []
+    cote_moyenne_du_jour = []
+
+
+# ==============================
+# LOOP
+# ==============================
+schedule.every(1).hours.do(job_check)     # check toutes les heures
+schedule.every().day.at("19:00").do(job_envoi)  # envoi du mail à 19h
+
+if __name__ == "__main__":
+    job_check()  # première exécution directe
+    while True:
+        schedule.run_pending()
+        time.sleep(60)

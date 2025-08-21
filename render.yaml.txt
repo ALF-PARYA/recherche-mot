@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: mt07-bot
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      - key: EMAIL_SENDER
+        sync: false
+      - key: EMAIL_PASSWORD
+        sync: false
+      - key: EMAIL_RECEIVER
+        value: "antoine020999@gmail.com"
